@@ -1,0 +1,139 @@
+#!/usr/bin/env php
+<?php
+
+// wants php7 for new ternary thingy: "?:"
+
+///////////////////////////////////////////////////////////////////////
+// configuration
+///////////////////////////////////////////////////////////////////////
+// csv is only option for now
+define('OUTPUT_MODE', 'CSV');
+// where is target data. note we aren't looking in archived chats but same format
+define('INBOX_ROOT', './facebook-Damlslrws/messages/inbox'.DIRECTORY_SEPARATOR);
+// gnu grep (no options) format. @ are delimeters i add later.
+define('ID_PATTERN', '_..........$');
+///////////////////////////////////////////////////////////////////////
+
+// DOMDocument please just shut up about well-formedness
+libxml_use_internal_errors(true);
+libxml_clear_errors();
+
+if (OUTPUT_MODE == 'CSV') {
+    if (!file_exists('csv_all') /*is_dir('csv_all')*/) {
+        mkdir('csv_all');
+    }
+
+    // note this is literal elsewhere too for now
+    if (!file_exists('csv_split') /*is_dir('csv_all')*/) {
+        mkdir('csv_split');
+    }
+
+    // whole big file here
+    $main_file = fopen('csv_all'.DIRECTORY_SEPARATOR.'output.csv', 'w');
+    fputcsv($main_file, ['groupname','id','author','text','time']);
+} else {
+    // this would be better a switch but there's only one option so meh
+    $main_file = null;
+}
+
+// list of message inboxen
+$dir = scandir(INBOX_ROOT);
+
+// mostly useful for groups and pretty stuff
+function get_actual_title($xp) {
+    // could have got the <html:title> value maybe
+    $title = $xp->query('//div[@class="_3b0d"]')->item(0);
+    if ($title->nodeValue) {
+        $title = $title->nodeValue;
+    } else {
+        $title = null;
+    }
+    return $title;
+}
+
+// returns array: [name, text, time] as strings, no messing around
+function process_message($m) {
+    $new = [];
+    // facebook why so many empty divs??
+    foreach($m->childNodes as $datum) {
+        // technically don't have to check this because our implementation
+        // has a bug which causes it to drop all the useless divs i think
+        if ($datum->nodeValue) {
+            $new[] = $datum->nodeValue;
+        }
+    }
+
+    // we need to sometimes put things back in
+    switch (count($new)) {
+        case 1:
+            $new = ['FACEBOOK_USER', '', $new[0]];
+        case 2:
+            array_splice($new, 1, 0, '');
+            break;
+        case 3:
+            break;
+        default:
+            echo 'GOT MALFORMED DATA!:'.PHP_EOL;
+            var_dump($new);die;
+    }
+    return $new;
+}
+
+// returns array of arrays representing messages. times are formatted already
+function get_messages_in_convo($xp) {
+    $data = [];
+    // //div[@class~="uiBoxWhite"] but we're using xpath 1.0 in php7!!!
+    $msgs = $xp->query("//div[contains(concat(' ', normalize-space(@class), ' '), ' uiBoxWhite ')]");
+    foreach ($msgs as $m) {
+        $data[] = process_message($m);
+    }
+    return array_reverse($data);
+}
+
+function write_to_csv($main_file, $fp, $inp) {
+    // put stuff in main file
+    fputcsv($main_file, $inp);
+    // now individual file
+    fputcsv($fp, [$inp[0], $inp[2], $inp[3], $inp[4]]);
+}
+
+// main(): glob the individual dirs out
+foreach ($dir as $u) {
+    // interested in each 'message_1.html' which represents a conversation
+    $f = INBOX_ROOT.$u.DIRECTORY_SEPARATOR.'message_1.html';
+    // just skip the dirs without it
+    if(file_exists($f)) {
+        echo $f.PHP_EOL;
+        // set $id and $name just based on filename ... csv doesn't use lol
+        if (preg_match('@'.ID_PATTERN.'@', $u, $id)) {
+            $id = substr($id[0],1,9);
+            $name = substr($u,0,strlen(ID_PATTERN)*-1+1);
+        } else {
+            // don't have name
+            $id = $u;
+            $name = 'FACEBOOK_USER';
+        }
+        // set up dom stuff
+        $doc = new DOMDocument(/*'1.0', 'UTF-8'*/);
+        $doc->LoadHTMLFile($f);
+        $xp = new DOMXpath($doc);
+        // get data for csv
+        $title = get_actual_title($xp) ?: $name;
+        $data = get_messages_in_convo($xp);
+        // GOTCHA! this filename is magic! file for just one convo
+        $fp = fopen('csv_split'.DIRECTORY_SEPARATOR."$u.csv", 'w');
+        fputcsv($fp, ['groupname', 'author','text','time']);
+        // now file each message
+        foreach ($data as $m) {
+            // what we do now depends on output mode but we only have csv atm
+            switch (OUTPUT_MODE) {
+                case 'CSV':
+                default:
+                    // pass main file pointer in so we don't "global it in"
+                    write_to_csv($main_file, $fp, [$title, $u, $m[0], $m[2], $m[1]]);
+                break;
+            }
+        } // end filing each message
+
+    } // end if valid file
+} // end foreach
